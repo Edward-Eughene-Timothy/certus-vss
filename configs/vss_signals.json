@@ -1,0 +1,10 @@
+{
+  "signals": [
+    { "path": "Vehicle.Speed", "unit": "km/h" },
+    { "path": "Vehicle.Powertrain.TractionBattery.Temperature", "unit": "celsius" },
+    { "path": "Vehicle.Powertrain.TractionBattery.Current", "unit": "amperes" },
+    { "path": "Vehicle.Powertrain.TractionBattery.StateOfCharge", "unit": "percent" },
+    { "path": "Vehicle.Cabin.HVAC.PowerDraw", "unit": "watts" },
+    { "path": "Vehicle.Powertrain.ElectricMotor.CoolantTemperature", "unit": "celsius" }
+  ]
+}

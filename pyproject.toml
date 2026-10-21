@@ -1,0 +1,27 @@
+[project]
+name = "certus-vss"
+version = "0.1.0"
+description = "Deterministic On-Device Vehicle Telemetry Intelligence under Embedded Edge Constraints"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Edward Eughene Timothy", email = "lead@wiredcaterva.internal" },
+    { name = "Aryan A Sajith" },
+    { name = "Bhavik Kumar M" }
+]
+dependencies = [
+    "textual>=0.70.0",
+    "pydantic>=2.0.0",
+    "python-can>=4.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-benchmark>=4.0.0",
+    "psutil>=5.9.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
