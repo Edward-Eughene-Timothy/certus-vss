@@ -35,3 +35,18 @@ build/
 # Profiling and logs
 *.log
 benchmark_results.json
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Databases & WAL files (reproducible via seed_historical.py)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Large Model Weights (exceeds GitHub 100MB file limit)
+models/*.gguf
+models/*.bin
