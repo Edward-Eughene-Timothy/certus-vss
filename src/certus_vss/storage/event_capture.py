@@ -15,7 +15,10 @@ from typing import Any, Mapping
 from certus_vss.common.config import DB_PATH
 from certus_vss.ingestion.ring_buffer import SIGNAL_PATHS, TelemetryRingBuffer
 from certus_vss.storage.db_engine import SCHEMA_PATH, init_database
+from certus_vss.storage.capture_scheduler import PostEventCaptureScheduler
 
+# Shared background scheduler for post-event freeze-frame capture.
+_POST_EVENT_SCHEDULER = PostEventCaptureScheduler()
 
 def _finite_number(value: Any, field: str, *, default: float | None = None) -> float:
     if value is None and default is not None:
@@ -101,8 +104,19 @@ def record_safety_event(
         event_id = int(cursor.lastrowid)
         _insert_freeze_frames(conn, event_id, buffer, timestamp, pre_seconds, post_seconds)
         conn.commit()
-    return event_id
 
+    # Schedule completion after the event is committed.
+    # The timer runs in the background, so ingestion is not blocked.
+    _POST_EVENT_SCHEDULER.schedule(
+        event_id,
+        buffer,
+        timestamp,
+        db_path,
+        pre_seconds=pre_seconds,
+        post_seconds=post_seconds,
+    )
+
+    return event_id
 
 def capture_event_window(
     event_id: int,
