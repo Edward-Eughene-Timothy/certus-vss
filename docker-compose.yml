@@ -2,16 +2,14 @@ services:
   certus-sandbox:
     build: .
     container_name: certus_vss_sandbox
-    # Enforce strict embedded hardware boundaries
+    gpus: all
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 2048M
-    # Mount local project directory into the container
     volumes:
       - .:/app
-    # Interactive TTY for running tests and TUI
     stdin_open: true
     tty: true
     network_mode: "none"
