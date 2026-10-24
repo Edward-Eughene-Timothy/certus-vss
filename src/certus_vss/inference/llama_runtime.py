@@ -17,6 +17,55 @@ from certus_vss.common.config import (
 )
 from certus_vss.inference.watchdog import Watchdog
 
+def summarize_evidence(evidence_json: dict[str, Any]) -> str:
+    """Summarize recorded evidence without inventing measurements."""
+    if not isinstance(evidence_json, dict):
+        raise ValueError("evidence_json must be a dictionary")
+
+    lines = [
+        f"Intent: {evidence_json.get('intent', 'not specified')}",
+        f"Records returned: {evidence_json.get('row_count', 0)}",
+    ]
+
+    requested_signal = evidence_json.get("requested_signal")
+    if requested_signal:
+        lines.append(f"Requested signal: {requested_signal}")
+
+    observed_signals = evidence_json.get("observed_signals", [])
+    if observed_signals:
+        lines.append(
+            "Observed signals: " + ", ".join(str(s) for s in observed_signals)
+        )
+
+    missing_signals = evidence_json.get("missing_signals", [])
+    if missing_signals:
+        lines.append(
+            "Signals with no matching observations: "
+            + ", ".join(str(s) for s in missing_signals)
+        )
+
+    records = evidence_json.get("evidence", [])
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        signal = record.get("vss_path")
+        value = record.get("val_avg")
+        unit = record.get("unit")
+
+        if signal is not None and value is not None:
+            measurement = f"{signal}: recorded average {value}"
+            if unit:
+                measurement += f" {unit}"
+            lines.append(measurement)
+
+    if not records:
+        lines.append("No evidence records were returned.")
+
+    lines.append(
+        "These records alone do not establish a diagnosis or root cause."
+    )
+    return "\n".join(lines)
 
 def _generate_with_model(evidence_json: dict[str, Any]) -> str:
     """Generate an explanation using the local GGUF model."""
@@ -43,11 +92,18 @@ def _generate_with_model(evidence_json: dict[str, Any]) -> str:
     )
 
     evidence_text = json.dumps(evidence_json, ensure_ascii=False, sort_keys=True)
+    evidence_summary = summarize_evidence(evidence_json)
+
     prompt = (
         "You are a vehicle telemetry explanation assistant. "
-        "Explain only what the supplied evidence supports. "
-        "Do not invent sensor readings, calculations, fault codes, or causes. "
-        "If evidence is missing or inconclusive, say so clearly.\n\n"
+        "Explain the supplied evidence accurately and concisely. "
+        "Treat the structured evidence and evidence summary as the only sources "
+        "of factual information. "
+        "Do not contradict recorded values, invent measurements, or infer "
+        "diagnoses or root causes that the evidence does not establish. "
+        "Distinguish missing data from a measured value of zero. "
+        "If the evidence is insufficient, say so clearly.\n\n"
+        f"Evidence summary:\n{evidence_summary}\n\n"
         f"Verified evidence JSON:\n{evidence_text}\n\n"
         "Concise explanation:"
     )
