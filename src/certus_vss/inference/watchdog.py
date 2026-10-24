@@ -30,7 +30,7 @@ class Watchdog:
 
     def run(self, operation: Callable[[], Any]) -> Any:
         """Return the result, or raise TimeoutError if the deadline expires."""
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context()
         result_queue = context.Queue()
         process = context.Process(
             target=_worker,
