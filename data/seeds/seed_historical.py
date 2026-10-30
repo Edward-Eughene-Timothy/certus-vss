@@ -11,7 +11,7 @@ import math
 import random
 import time
 from pathlib import Path
-from certus_vss.storage.db_engine import get_writer_connection, DB_PATH
+from certus_vss.storage.db_engine import get_writer_connection, DB_PATH, init_database
 
 # 30 Days in minutes: 30 * 24 * 60 = 43,200
 TOTAL_MINUTES = 43_200
@@ -30,6 +30,7 @@ DRIVE_CONTEXTS = ["URBAN_STOP_GO", "HIGHWAY_CRUISE", "IDLE", "CHARGING"]
 
 
 def generate_and_seed() -> None:
+    init_database()
     start_time = time.time()
     now_epoch_s = int(start_time)
     start_epoch_m = (now_epoch_s // 60) - TOTAL_MINUTES
