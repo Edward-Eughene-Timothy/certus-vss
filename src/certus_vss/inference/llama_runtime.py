@@ -79,13 +79,14 @@ class SLMDiagnosticRuntime:
             raise EvidenceMissingError("Missing event block in evidence")
         if ev.get("trigger_value") is None or isinstance(ev.get("trigger_value"), bool):
             raise EvidenceMissingError("Missing verified trigger_value")
-        if not ev.get("dtc_code") or not isinstance(ev.get("dtc_code"), str):
-            raise EvidenceMissingError("Missing verified dtc_code")
 
         tv = round(float(ev["trigger_value"]), 2)
-        dtc = ev["dtc_code"].strip()
+        dtc = ev.get("dtc_code")
+        category = ev.get("category", "EVENT").strip().upper()
+        
+        tag = f"Fault {dtc}" if dtc else f"Event {category}"
 
-        prefix = f'{{"summary": "Fault {dtc} at {tv}", "key_facts": ["Trigger value '
+        prefix = f'{{"summary": "{tag} at {tv}", "key_facts": ["Trigger value '
         prompt = f"Value={tv}\n" + prefix
 
         rem_s = wd.remaining_s()
@@ -105,7 +106,6 @@ class SLMDiagnosticRuntime:
         if not self._parent_conn.poll(timeout=rem_s):
             elapsed = wd.elapsed_ms()
             self._kill_worker()
-            # Re-warm replacement worker so subsequent requests can execute
             self._start_worker()
             raise DeadlineExceededError(
                 f"Inference worker killed after exceeding {deadline_ms}ms budget (elapsed: {elapsed:.2f}ms)"

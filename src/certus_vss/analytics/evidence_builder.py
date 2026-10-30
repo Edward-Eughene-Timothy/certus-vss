@@ -2,7 +2,7 @@
 evidence_builder.py: Fail-closed deterministic telemetry evidence extractor.
 """
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from certus_vss.storage.db_engine import get_readonly_connection
 from certus_vss.analytics.query_engine import DeterministicQueryEngine
 
@@ -41,10 +41,13 @@ class EvidenceBuilder:
                 raise EvidenceMissingError(f"Event ID {event_id} not found.")
             event = dict(row)
 
-        for req_str in ("dtc_code", "event_category", "severity", "trigger_signal"):
+        for req_str in ("event_category", "severity", "trigger_signal"):
             val = event.get(req_str)
             if not isinstance(val, str) or not val.strip():
                 raise EvidenceMissingError(f"Missing required string field: {req_str}")
+
+        raw_dtc = event.get("dtc_code")
+        dtc_code: Optional[str] = raw_dtc.strip() if isinstance(raw_dtc, str) and raw_dtc.strip() else None
 
         trigger_path = event["trigger_signal"].strip()
         trigger_val = _require_finite_float(event.get("trigger_value"), "trigger_value")
@@ -96,7 +99,7 @@ class EvidenceBuilder:
             "event": {
                 "event_id": int(event["event_id"]),
                 "timestamp_utc_s": event_time_s,
-                "dtc_code": event["dtc_code"].strip(),
+                "dtc_code": dtc_code,
                 "category": event["event_category"].strip(),
                 "severity": event["severity"].strip(),
                 "trigger_signal": trigger_path,
