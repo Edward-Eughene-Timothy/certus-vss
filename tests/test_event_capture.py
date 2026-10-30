@@ -109,3 +109,71 @@ def test_scheduler_captures_later_telemetry_automatically(tmp_path):
         time.sleep(0.05)
 
     assert row == (20.0,)
+
+def test_carla_collision_callback_persists_safety_event(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from certus_vss.ingestion import carla_adapter
+    from certus_vss.storage.event_capture import record_safety_event
+
+    db = tmp_path / "carla_collision.sqlite"
+    buffer = TelemetryRingBuffer(maxlen=20, retention_seconds=3600)
+    assert buffer.append(_frame(1000.0, 0, 25.0, 32.0))
+
+    # Fake CARLA blueprint, world, and sensor so no CARLA server is needed.
+    class FakeSensor:
+        def listen(self, callback):
+            self.callback = callback
+
+    sensor = FakeSensor()
+    world = SimpleNamespace(
+        get_blueprint_library=lambda: SimpleNamespace(
+            find=lambda name: name
+        ),
+        spawn_actor=lambda *args, **kwargs: sensor,
+    )
+
+    monkeypatch.setattr(
+        carla_adapter,
+        "_identity_transform",
+        lambda world: object(),
+    )
+
+    captured_event_ids = []
+
+    def handle_collision(event):
+        event_id = record_safety_event(buffer, event, db)
+        captured_event_ids.append(event_id)
+
+    monkeypatch.setattr(carla_adapter.time, "time", lambda: 1000.0)
+
+    carla_adapter.attach_collision_sensor(
+        world,
+        object(),
+        handle_collision,
+    )
+
+    collision = SimpleNamespace(
+        normal_impulse=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+        other_actor=SimpleNamespace(id=42),
+    )
+    sensor.callback(collision)
+
+    assert len(captured_event_ids) == 1
+
+    with sqlite3.connect(db) as conn:
+        event = conn.execute(
+            """SELECT event_category, trigger_value, context_json
+               FROM vehicle_events WHERE event_id=?""",
+            (captured_event_ids[0],),
+        ).fetchone()
+        freeze_frames = conn.execute(
+            """SELECT COUNT(*) FROM fault_freeze_frames
+               WHERE event_id=?""",
+            (captured_event_ids[0],),
+        ).fetchone()[0]
+
+    assert event[0] == "collision"
+    assert event[1] == 5.0
+    assert json.loads(event[2])["other_actor_id"] == 42
+    assert freeze_frames == 2

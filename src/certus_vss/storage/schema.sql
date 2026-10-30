@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS telemetry_rollup_1m (
     val_avg         REAL NOT NULL,       -- 60s mathematical average
     val_min         REAL NOT NULL,       -- Minimum value in the 60s window
     val_max         REAL NOT NULL,       -- Maximum value in the 60s window
-    val_delta       REAL NOT NULL,       -- Spread (val_max - val_min)
+    val_delta       REAL NOT NULL,       -- Last valid sample minus first valid sample
     sample_count    INTEGER NOT NULL,    -- Number of raw frames aggregated (~600 at 10Hz)
     unit            TEXT NOT NULL,       -- Engineering unit ('km/h', 'celsius', 'amperes')
     drive_context   TEXT NOT NULL,       -- 'URBAN_STOP_GO', 'HIGHWAY_CRUISE', 'IDLE', 'CHARGING'

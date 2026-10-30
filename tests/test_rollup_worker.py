@@ -13,7 +13,7 @@ def _frame(timestamp, sequence, speed, battery_temp=None):
 
 def test_rollup_writes_completed_minutes_and_metadata(tmp_path):
     db_path = tmp_path / "rollups.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
     # Minute 100 is complete; minute 101 is still in progress at t=6101.
     assert buffer.append(_frame(6000, 0, 10, 30))
     assert buffer.append(_frame(6020, 1, 20, 32))
@@ -40,7 +40,7 @@ def test_rollup_writes_completed_minutes_and_metadata(tmp_path):
 
 def test_repeat_flush_is_idempotent(tmp_path):
     db_path = tmp_path / "rollups.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
     assert buffer.append(_frame(6000, 0, 10))
     assert buffer.append(_frame(6061, 1, 99))
     assert flush_buffer_to_rollup(buffer, db_path) == 1
@@ -50,14 +50,14 @@ def test_repeat_flush_is_idempotent(tmp_path):
 
 
 def test_no_write_until_a_minute_is_complete(tmp_path):
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
     assert buffer.append(_frame(6000, 0, 10))
     assert buffer.append(_frame(6059, 1, 20))
     assert flush_buffer_to_rollup(buffer, tmp_path / "rollups.sqlite") == 0
 
 
 def test_missing_signals_are_skipped_not_counted_as_zero(tmp_path):
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
     assert buffer.append(_frame(6000, 0, 10, None))
     assert buffer.append(_frame(6020, 1, 20, None))
     assert buffer.append(_frame(6061, 2, 30, None))
@@ -69,7 +69,7 @@ def test_missing_signals_are_skipped_not_counted_as_zero(tmp_path):
 
 def test_stationary_vehicle_is_classified_as_idle(tmp_path):
     db_path = tmp_path / "idle.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
 
     def make_frame(timestamp, sequence, speed):
         signals = {path: None for path in SIGNAL_PATHS}
@@ -98,7 +98,7 @@ def test_stationary_vehicle_is_classified_as_idle(tmp_path):
 
 def test_stationary_vehicle_charging_is_classified_as_charging(tmp_path):
     db_path = tmp_path / "charging.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
 
     def make_frame(timestamp, sequence):
         signals = {path: None for path in SIGNAL_PATHS}
@@ -127,7 +127,7 @@ def test_stationary_vehicle_charging_is_classified_as_charging(tmp_path):
 
 def test_steady_high_speed_is_classified_as_highway_cruise(tmp_path):
     db_path = tmp_path / "highway.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
 
     def make_frame(timestamp, sequence):
         signals = {path: None for path in SIGNAL_PATHS}
@@ -156,7 +156,7 @@ def test_steady_high_speed_is_classified_as_highway_cruise(tmp_path):
 
 def test_stop_and_go_driving_is_classified_as_urban(tmp_path):
     db_path = tmp_path / "urban.sqlite"
-    buffer = TelemetryRingBuffer(maxlen=20)
+    buffer = TelemetryRingBuffer(maxlen=100)
 
     # Keep repeated stop-and-go transitions inside minute 100.
     speeds = [30, 0, 25, 0, 20, 0]
@@ -196,3 +196,42 @@ def test_stop_and_go_driving_is_classified_as_urban(tmp_path):
         ).fetchall()
 
     assert contexts == [("URBAN_STOP_GO",)]
+
+def test_simulated_telemetry_reaches_persisted_rollups(tmp_path):
+    import sqlite3
+
+    from certus_vss.ingestion.sim_stream import iter_simulated_frames
+
+    db_path = tmp_path / "simulated_rollups.sqlite"
+    buffer = TelemetryRingBuffer(maxlen=100)
+
+    # Generate deterministic frames spanning two minute buckets.
+    frames = iter_simulated_frames(
+        sample_hz=1,
+        max_samples=62,
+        start_epoch=6000,
+    )
+    for frame in frames:
+        assert buffer.append(frame)
+
+    inserted = flush_buffer_to_rollup(
+        buffer,
+        db_path,
+        provenance="integration_test.simulator",
+    )
+
+    assert inserted > 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT bucket_epoch_m, vss_path, sample_count, provenance
+            FROM telemetry_rollup_1m
+            ORDER BY bucket_epoch_m, vss_path
+            """
+        ).fetchall()
+
+    assert rows
+    assert any(row[1] == "Vehicle.Speed" for row in rows)
+    assert all(row[3] == "integration_test.simulator" for row in rows)
+    assert {row[0] for row in rows} == {100}
