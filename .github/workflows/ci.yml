@@ -1,17 +1,28 @@
 name: CI
+
 on: [push, pull_request]
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -e .[dev]
-      - name: Run tests
-        run: pytest
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Qwen Model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          key: qwen-0.5b-q4_k_m-v1
+
+      - name: Download Model Artifact (if not cached)
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          bash models/download_model.sh
+
+      - name: Build and Test in Docker Sandbox
+        run: |
+          docker compose build
+          docker compose run --rm certus-sandbox python3 data/seeds/seed_historical.py
+          docker compose run --rm certus-sandbox pytest -v
