@@ -16,7 +16,7 @@ from certus_vss.inference.validator import ParityMismatchError, verify_diagnosti
 
 DEFAULT_MODEL_PATH = Path("/app/models/qwen2.5-0.5b-instruct-q4_k_m.gguf")
 GRAMMAR_PATH = Path("/app/configs/response.gbnf")
-DEFAULT_THREADS = min(4, max(2, os.cpu_count() or 2))
+DEFAULT_THREADS = 2
 
 
 class SLMDiagnosticRuntime:
@@ -73,7 +73,7 @@ class SLMDiagnosticRuntime:
     def generate_diagnostic(
         self,
         evidence: Dict[str, Any],
-        max_tokens: int = 16,
+        max_tokens: int = 12,
         deadline_ms: float = 1850.0,
         simulate_stall_ms: float = 0.0,
         _watchdog: Optional[MonotonicWatchdog] = None,

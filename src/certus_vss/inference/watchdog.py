@@ -31,7 +31,7 @@ class MonotonicWatchdog:
         return max(0.0, rem_ms / 1000.0)
 
 
-def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str, n_threads: int) -> None:
+def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str, n_threads: int = 2) -> None:
     """Top-level worker process entry point (spawn-safe). Loads llama.cpp once."""
     try:
         from llama_cpp import Llama, LlamaGrammar
@@ -40,7 +40,7 @@ def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str
             model_path=model_path_str,
             n_ctx=256,
             n_threads=n_threads,
-            n_batch=256,
+            n_batch=128,
             use_mmap=True,
             verbose=False,
         )
@@ -72,7 +72,7 @@ def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str
         try:
             res = llm(
                 msg["prompt"],
-                max_tokens=int(msg.get("max_tokens", 24)),
+                max_tokens=int(msg.get("max_tokens", 12)),
                 temperature=0.0,
                 grammar=grammar,
             )
