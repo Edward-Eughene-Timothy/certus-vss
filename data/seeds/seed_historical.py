@@ -1,258 +1,222 @@
 """
-Historical 30-Day Telemetry Rollup & Event Seeder for CertusVSS.
-Populates data/certus_telemetry.db with 30 days of 1-minute rollup records
-(43,200 minutes x 6 signals = 259,200 rows) plus realistic vehicle events.
+seed_historical.py: Synthesizes 30 days of high-fidelity automotive telemetry.
+Populates:
+  - telemetry_rollup_1m: 43,200 minutes * 6 signals = 259,200 rows (~24 MB)
+  - vehicle_events: Diagnostic events (e.g., P0A7F Battery Degradation / Thermal Warning)
+  - fault_freeze_frames: 10 Hz raw pre/post trigger window around events
 """
 
+import json
 import math
 import random
 import time
 from pathlib import Path
+from certus_vss.storage.db_engine import get_writer_connection, DB_PATH, init_database
 
-from certus_vss.common.config import DB_PATH
-from certus_vss.storage.db_engine import init_database, get_writer_connection
+# 30 Days in minutes: 30 * 24 * 60 = 43,200
+TOTAL_MINUTES = 43_200
+CHUNK_SIZE = 10_000  # Batch size to keep memory flat under 20 MB
 
 SIGNALS = [
-    {
-        "path": "Vehicle.Speed",
-        "unit": "km/h",
-        "base_min": 0.0,
-        "base_max": 120.0,
-        "noise": 5.0,
-    },
-    {
-        "path": "Vehicle.Powertrain.TractionBattery.Temperature",
-        "unit": "celsius",
-        "base_min": 25.0,
-        "base_max": 45.0,
-        "noise": 0.8,
-    },
-    {
-        "path": "Vehicle.Powertrain.TractionBattery.Current",
-        "unit": "amperes",
-        "base_min": -150.0,
-        "base_max": 200.0,
-        "noise": 10.0,
-    },
-    {
-        "path": "Vehicle.Powertrain.TractionBattery.StateOfCharge",
-        "unit": "percent",
-        "base_min": 10.0,
-        "base_max": 100.0,
-        "noise": 0.2,
-    },
-    {
-        "path": "Vehicle.Cabin.HVAC.PowerDraw",
-        "unit": "watts",
-        "base_min": 200.0,
-        "base_max": 2500.0,
-        "noise": 50.0,
-    },
-    {
-        "path": "Vehicle.Powertrain.ElectricMotor.CoolantTemperature",
-        "unit": "celsius",
-        "base_min": 30.0,
-        "base_max": 65.0,
-        "noise": 1.2,
-    },
+    {"path": "Vehicle.Speed", "unit": "km/h", "base": 45.0, "noise": 15.0},
+    {"path": "Vehicle.Powertrain.TractionBattery.StateOfCharge", "unit": "percent", "base": 72.0, "noise": 5.0},
+    {"path": "Vehicle.Powertrain.TractionBattery.Temperature", "unit": "celsius", "base": 31.0, "noise": 3.0},
+    {"path": "Vehicle.Powertrain.TractionBattery.Current", "unit": "amperes", "base": 65.0, "noise": 25.0},
+    {"path": "Vehicle.Powertrain.TractionBattery.Voltage", "unit": "volts", "base": 395.0, "noise": 4.0},
+    {"path": "Vehicle.Cabin.HVAC.PowerDraw", "unit": "watts", "base": 1200.0, "noise": 300.0},
 ]
 
-DRIVE_CONTEXTS = [
-    "URBAN_STOP_GO",
-    "HIGHWAY_CRUISE",
-    "IDLE",
-    "CHARGING",
-]
+DRIVE_CONTEXTS = ["URBAN_STOP_GO", "HIGHWAY_CRUISE", "IDLE", "CHARGING"]
 
 
-def seed_data(days: int = 30) -> None:
-    print(f"[CertusVSS Seeder] Initializing database at: {DB_PATH}")
+def generate_and_seed() -> None:
     init_database()
+    start_time = time.time()
+    now_epoch_s = int(start_time)
+    start_epoch_m = (now_epoch_s // 60) - TOTAL_MINUTES
 
-    total_minutes = days * 24 * 60  # 43,200 minutes for 30 days
-    current_time_s = int(time.time())
-    start_epoch_m = (current_time_s // 60) - total_minutes
+    print(f"[Seed] Generating 30 days ({TOTAL_MINUTES:,} minutes) across {len(SIGNALS)} signals...")
+    print(f"[Seed] Total expected rollup rows: {TOTAL_MINUTES * len(SIGNALS):,}")
 
-    print(
-        f"[CertusVSS Seeder] Generating {total_minutes} minutes x {len(SIGNALS)} signals "
-        f"= {total_minutes * len(SIGNALS):,} rollup records..."
-    )
-
-    rollup_rows = []
-    events_rows = []
-    batch_size = 20_000
-
-    # Simulating diurnal commute cycles
     with get_writer_connection() as conn:
         cursor = conn.cursor()
 
-        # Clean existing rollups to allow idempotent reseeding
-        cursor.execute("DELETE FROM telemetry_rollup_1m")
-        cursor.execute("DELETE FROM vehicle_events")
-        cursor.execute("DELETE FROM fault_freeze_frames")
+        # Clear previous data to ensure idempotent seeding
+        cursor.execute("DELETE FROM fault_freeze_frames;")
+        cursor.execute("DELETE FROM vehicle_events;")
+        cursor.execute("DELETE FROM telemetry_rollup_1m;")
+        cursor.execute("DELETE FROM sqlite_sequence WHERE name='vehicle_events';")
+        conn.commit()
 
-        for m in range(total_minutes):
-            epoch_m = start_epoch_m + m
-            minute_of_day = (epoch_m % 1440)
-            hour_of_day = minute_of_day / 60.0
+        # ---------------------------------------------------------------------
+        # 1. Seed Tier 2: 1-Minute Rollups (Batched chunks)
+        # ---------------------------------------------------------------------
+        rollup_batch = []
+        total_inserted = 0
 
-            # Commute hours vs night idle/charging
-            if 7.0 <= hour_of_day <= 9.0 or 17.0 <= hour_of_day <= 19.0:
-                context = "URBAN_STOP_GO" if random.random() < 0.6 else "HIGHWAY_CRUISE"
-                driving = True
-            elif 10.0 <= hour_of_day <= 16.0:
-                context = "HIGHWAY_CRUISE" if random.random() < 0.4 else "IDLE"
-                driving = context != "IDLE"
-            elif 23.0 <= hour_of_day or hour_of_day <= 5.0:
-                context = "CHARGING" if random.random() < 0.8 else "IDLE"
-                driving = False
+        for minute_offset in range(TOTAL_MINUTES):
+            bucket_m = start_epoch_m + minute_offset
+            
+            # Diurnal & drive-cycle context simulation
+            hour_of_day = (minute_offset // 60) % 24
+            if 0 <= hour_of_day < 6:
+                context = "CHARGING" if (minute_offset % 3 == 0) else "IDLE"
+            elif 7 <= hour_of_day <= 9 or 17 <= hour_of_day <= 19:
+                context = "URBAN_STOP_GO"
             else:
-                context = "IDLE"
-                driving = False
-
-            # Synthetic variations for signals
-            cycle_phase = (m % 1440) / 1440.0 * 2 * math.pi
-            temp_diurnal = math.sin(cycle_phase) * 5.0  # warmer in afternoon
-
-            # SoC depletion and charging cycles
-            soc_val = max(15.0, min(98.0, 50.0 + 35.0 * math.cos(cycle_phase)))
+                context = "HIGHWAY_CRUISE" if (minute_offset % 2 == 0) else "IDLE"
 
             for sig in SIGNALS:
-                path = sig["path"]
-                unit = sig["unit"]
-                sample_count = 600  # 10Hz raw stream across 60 seconds
-
-                if path == "Vehicle.Speed":
-                    if driving and context == "HIGHWAY_CRUISE":
-                        val_avg = round(random.uniform(70.0, 110.0), 2)
-                        val_min = round(max(0.0, val_avg - random.uniform(5.0, 15.0)), 2)
-                        val_max = round(val_avg + random.uniform(5.0, 15.0), 2)
-                    elif driving and context == "URBAN_STOP_GO":
-                        val_avg = round(random.uniform(15.0, 45.0), 2)
-                        val_min = 0.0
-                        val_max = round(val_avg + random.uniform(10.0, 30.0), 2)
-                    else:
-                        val_avg, val_min, val_max = 0.0, 0.0, 0.0
-                        sample_count = 600
-
-                elif path == "Vehicle.Powertrain.TractionBattery.Temperature":
-                    base = 32.0 + temp_diurnal
-                    if context == "CHARGING":
-                        base += 4.0
-                    val_avg = round(base + random.uniform(-0.4, 0.4), 2)
-                    val_min = round(val_avg - random.uniform(0.1, 0.5), 2)
-                    val_max = round(val_avg + random.uniform(0.1, 0.5), 2)
-
-                elif path == "Vehicle.Powertrain.TractionBattery.Current":
-                    if context == "CHARGING":
-                        val_avg = round(random.uniform(-60.0, -25.0), 2)  # negative = charging
-                        val_min = round(val_avg - 5.0, 2)
-                        val_max = round(val_avg + 3.0, 2)
-                    elif driving:
-                        val_avg = round(random.uniform(20.0, 120.0), 2)
-                        val_min = round(max(-20.0, val_avg - 30.0), 2)  # regen braking
-                        val_max = round(val_avg + 40.0, 2)
-                    else:
-                        val_avg, val_min, val_max = 1.2, 0.8, 1.8
-
-                elif path == "Vehicle.Powertrain.TractionBattery.StateOfCharge":
-                    val_avg = round(soc_val, 2)
-                    val_min = round(max(0.0, soc_val - 0.2), 2)
-                    val_max = round(min(100.0, soc_val + 0.2), 2)
-
-                elif path == "Vehicle.Cabin.HVAC.PowerDraw":
-                    if driving or context == "CHARGING":
-                        val_avg = round(random.uniform(600.0, 1800.0), 1)
-                        val_min = round(val_avg - 150.0, 1)
-                        val_max = round(val_avg + 200.0, 1)
-                    else:
-                        val_avg, val_min, val_max = 0.0, 0.0, 0.0
-
-                elif path == "Vehicle.Powertrain.ElectricMotor.CoolantTemperature":
-                    base = 42.0 + temp_diurnal
-                    if driving and context == "HIGHWAY_CRUISE":
-                        base += 12.0
-                    val_avg = round(base + random.uniform(-0.8, 0.8), 2)
-                    val_min = round(val_avg - 1.0, 2)
-                    val_max = round(val_avg + 1.2, 2)
+                # Add sinusoidal time-of-day wave + pseudo-random noise
+                wave = math.sin((minute_offset / 1440.0) * 2 * math.pi) * (sig["noise"] * 0.5)
+                jitter = (random.random() - 0.5) * sig["noise"]
+                
+                # Context-specific adjustments
+                if context == "IDLE":
+                    avg_val = 0.0 if "Speed" in sig["path"] else sig["base"] * 0.85
+                elif context == "CHARGING":
+                    avg_val = -32.0 if "Current" in sig["path"] else sig["base"] * 0.9
                 else:
-                    val_avg, val_min, val_max = 0.0, 0.0, 0.0
+                    avg_val = max(0.0, sig["base"] + wave + jitter)
 
+                spread = abs(jitter) * 0.4
+                val_min = round(max(0.0, avg_val - spread), 2)
+                val_max = round(avg_val + spread, 2)
+                val_avg = round(avg_val, 2)
                 val_delta = round(val_max - val_min, 2)
 
-                rollup_rows.append((
-                    epoch_m,
-                    path,
+                rollup_batch.append((
+                    bucket_m,
+                    sig["path"],
                     val_avg,
                     val_min,
                     val_max,
                     val_delta,
-                    sample_count,
-                    unit,
+                    600,             # sample_count (10 Hz * 60s)
+                    sig["unit"],
                     context,
-                    "SIMULATED",
+                    "SIMULATED"
                 ))
 
-            # Occasionally inject diagnostic trouble events
-            if m % 7200 == 1200:  # ~every 5 days
-                event_sec = epoch_m * 60 + 30
-                events_rows.append((
-                    event_sec,
-                    "THERMAL_WARN",
-                    "P0A7F",
-                    "WARNING",
-                    "Vehicle.Powertrain.TractionBattery.Temperature",
-                    46.8,
-                    '{"ambient_temp": 38.5, "speed_kmh": 104.2, "soc_pct": 42.0}',
-                    "SIMULATED",
-                ))
-
-            if len(rollup_rows) >= batch_size:
+            if len(rollup_batch) >= CHUNK_SIZE:
                 cursor.executemany(
                     """
-                    INSERT INTO telemetry_rollup_1m (
-                        bucket_epoch_m, vss_path, val_avg, val_min, val_max,
-                        val_delta, sample_count, unit, drive_context, provenance
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO telemetry_rollup_1m 
+                    (bucket_epoch_m, vss_path, val_avg, val_min, val_max, val_delta, sample_count, unit, drive_context, provenance)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    rollup_rows,
+                    rollup_batch
                 )
-                rollup_rows.clear()
-                print(f"[CertusVSS Seeder] Committed batch at minute {m}/{total_minutes}...")
+                conn.commit()
+                total_inserted += len(rollup_batch)
+                rollup_batch.clear()
 
-        if rollup_rows:
+        if rollup_batch:
             cursor.executemany(
                 """
-                INSERT INTO telemetry_rollup_1m (
-                    bucket_epoch_m, vss_path, val_avg, val_min, val_max,
-                    val_delta, sample_count, unit, drive_context, provenance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO telemetry_rollup_1m 
+                (bucket_epoch_m, vss_path, val_avg, val_min, val_max, val_delta, sample_count, unit, drive_context, provenance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                rollup_rows,
+                rollup_batch
             )
-            rollup_rows.clear()
+            conn.commit()
+            total_inserted += len(rollup_batch)
+            rollup_batch.clear()
 
-        if events_rows:
-            cursor.executemany(
-                """
-                INSERT INTO vehicle_events (
-                    timestamp_utc_s, event_category, dtc_code, severity,
-                    trigger_signal, trigger_value, context_json, provenance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                events_rows,
+        print(f"[Seed] Successfully populated {total_inserted:,} rollup rows.")
+
+        # ---------------------------------------------------------------------
+        # 2. Seed Tier 4: Discrete Diagnostic Events (DTCs)
+        # ---------------------------------------------------------------------
+        # Event 1: Battery High-Temperature Alarm (5 days ago)
+        event_1_time = now_epoch_s - (5 * 86400) - 1800
+        cursor.execute(
+            """
+            INSERT INTO vehicle_events 
+            (timestamp_utc_s, event_category, dtc_code, severity, trigger_signal, trigger_value, context_json, provenance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                event_1_time,
+                "THERMAL_WARN",
+                "P0A7F",
+                "WARNING",
+                "Vehicle.Powertrain.TractionBattery.Temperature",
+                42.8,
+                json.dumps({
+                    "ambient_temp_c": 36.2,
+                    "speed_kmh": 112.4,
+                    "pack_current_a": 184.2,
+                    "cooling_fan_status": "OFFLINE"
+                }),
+                "SIMULATED"
             )
+        )
+        event_1_id = cursor.lastrowid
 
+        # Event 2: ADAS Disengagement due to camera occlusion (2 days ago)
+        event_2_time = now_epoch_s - (2 * 86400) - 3400
+        cursor.execute(
+            """
+            INSERT INTO vehicle_events 
+            (timestamp_utc_s, event_category, dtc_code, severity, trigger_signal, trigger_value, context_json, provenance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                event_2_time,
+                "ADAS_DISENGAGE",
+                "U0100",
+                "INFO",
+                "Vehicle.Speed",
+                88.5,
+                json.dumps({
+                    "steering_angle_deg": -1.4,
+                    "radar_snr_db": 18.2,
+                    "camera_optical_flow_confidence": 0.12
+                }),
+                "SIMULATED"
+            )
+        )
+        event_2_id = cursor.lastrowid
         conn.commit()
+        print(f"[Seed] Populated diagnostic events: Event ID {event_1_id} (P0A7F), Event ID {event_2_id} (U0100).")
 
-    db_file = Path(DB_PATH)
-    file_size_mb = db_file.stat().st_size / (1024 * 1024)
-    print(f"\n[CertusVSS Seeder] SUCCESS!")
-    print(f"-> Database path: {db_file.resolve()}")
-    print(f"-> Total Database Size: {file_size_mb:.2f} MB (Constraint budget: < 30 MB)")
-    print(f"-> Total 1-min Rollups Inserted: {total_minutes * len(SIGNALS):,}")
-    print(f"-> Total Diagnostic Events Inserted: {len(events_rows)}")
+        # ---------------------------------------------------------------------
+        # 3. Seed Tier 3: Fault Freeze-Frames (10 Hz pre/post trigger window)
+        # ---------------------------------------------------------------------
+        # ±30 second window around Event 1 @ 10 Hz (step of 100 ms) = 600 samples
+        freeze_frames = []
+        for offset in range(-120000, 120100, 100):
+            # Sigmoidal thermal runaway ramp leading up to the fault
+            ramp = 36.0 + (6.8 / (1.0 + math.exp(-offset / 15000.0)))
+            freeze_frames.append((
+                event_1_id,
+                offset,
+                "Vehicle.Powertrain.TractionBattery.Temperature",
+                round(ramp + (random.random() * 0.2), 2)
+            ))
+            freeze_frames.append((
+                event_1_id,
+                offset,
+                "Vehicle.Powertrain.TractionBattery.Current",
+                round(175.0 + (random.random() * 15.0), 1)
+            ))
+
+        cursor.executemany(
+            """
+            INSERT INTO fault_freeze_frames (event_id, offset_ms, vss_path, raw_value)
+            VALUES (?, ?, ?, ?);
+            """,
+            freeze_frames
+        )
+        conn.commit()
+        print(f"[Seed] Populated {len(freeze_frames):,} freeze-frame points for Event ID {event_1_id}.")
+
+    elapsed = time.time() - start_time
+    db_size_mb = Path(DB_PATH).stat().st_size / (1024 * 1024)
+    print(f"[Seed] Completed in {elapsed:.2f}s | SQLite Database size: {db_size_mb:.2f} MB")
 
 
 if __name__ == "__main__":
-    seed_data(days=30)
+    generate_and_seed()

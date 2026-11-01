@@ -1,3 +1,1 @@
-root ::= "{" ws "\"observation\":" ws string "," ws "\"probable_cause\":" ws string "," ws "\"missing_data\":" ws ( "null" | string ) "}"
-string ::= "\"" [^"\\]* "\""
-ws ::= [ \t\n\r]*
+root ::= [0-9] [0-9] "." [0-9] "\"]}"

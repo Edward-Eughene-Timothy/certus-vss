@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 
 from certus_vss.ingestion.ring_buffer import SIGNAL_PATHS, TelemetryRingBuffer
 from certus_vss.storage.event_capture import capture_event_window, record_safety_event
@@ -72,3 +73,39 @@ def test_event_rejects_invalid_timestamp(tmp_path):
         assert "timestamp" in str(exc)
     else:
         raise AssertionError("non-finite event timestamp should be rejected")
+
+def test_scheduler_captures_later_telemetry_automatically(tmp_path):
+    db = tmp_path / "scheduled_events.sqlite"
+    buffer = TelemetryRingBuffer(maxlen=20, retention_seconds=3600)
+
+    assert buffer.append(_frame(1000, 0, 10))
+
+    event_id = record_safety_event(
+        buffer,
+        {"timestamp": 1000, "event_type": "collision"},
+        db,
+        pre_seconds=120,
+        post_seconds=0.2,
+    )
+
+    time.sleep(0.05)
+    assert buffer.append(_frame(1000.1, 1, 20))
+
+    deadline = time.monotonic() + 3
+    row = None
+
+    while time.monotonic() < deadline:
+        with sqlite3.connect(db) as conn:
+            row = conn.execute(
+                """SELECT raw_value FROM fault_freeze_frames
+                   WHERE event_id=? AND vss_path='Vehicle.Speed'
+                   AND offset_ms=100""",
+                (event_id,),
+            ).fetchone()
+
+        if row is not None:
+            break
+
+        time.sleep(0.05)
+
+    assert row == (20.0,)

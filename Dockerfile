@@ -21,6 +21,7 @@ COPY src/ ./src/
 
 # Install dependencies and local package in editable mode
 RUN uv pip install --system -e ".[dev]"
+RUN uv pip install --system --no-cache-dir llama-cpp-python
 
 # Default working shell
 CMD ["/bin/bash"]
