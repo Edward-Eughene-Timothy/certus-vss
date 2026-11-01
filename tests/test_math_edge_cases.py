@@ -26,15 +26,42 @@ def test_empty_window_handling():
     print("[Pass] Empty window gracefully returned NO_DATA.")
 
 
-def test_exact_boundary_inclusivity():
-    """Verifies that BETWEEN includes both exact start and end minute buckets."""
-    engine = DeterministicQueryEngine()
-    
-    with get_readonly_connection() as conn:
-        row = conn.execute(
-            "SELECT MIN(bucket_epoch_m) FROM telemetry_rollup_1m WHERE vss_path = 'Vehicle.Speed';"
-        ).fetchone()
-        t0_m = row[0]
+def test_exact_boundary_inclusivity(tmp_path):
+    """Verifies that BETWEEN includes both exact start and end minute buckets in an isolated db."""
+    from certus_vss.storage.db_engine import init_database
+
+    db_file = tmp_path / "boundary_test.sqlite"
+    init_database(db_path=db_file)
+
+    t0_m = 1000
+    records = []
+    for offset in range(3):
+        m = t0_m + offset
+        records.append((
+            m,
+            "Vehicle.Speed",
+            "km/h",
+            float(55.0 + offset),
+            float(50.0 + offset),
+            float(60.0 + offset),
+            10.0,
+            600,
+            "HIGHWAY_CRUISE",
+            "SEED_SYNTHETIC"
+        ))
+
+    with sqlite3.connect(db_file) as conn:
+        conn.executemany(
+            """
+            INSERT INTO telemetry_rollup_1m 
+            (bucket_epoch_m, vss_path, unit, val_avg, val_min, val_max, val_delta, sample_count, drive_context, provenance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            records
+        )
+        conn.commit()
+
+    engine = DeterministicQueryEngine(db_path=db_file)
 
     # Exactly 1 minute window (start_m == end_m)
     res_single = engine.get_signal_metrics(
@@ -54,7 +81,6 @@ def test_exact_boundary_inclusivity():
     assert res_three["status"] == "SUCCESS"
     assert res_three["window_minutes"] == 3, f"Expected 3 buckets, got {res_three['window_minutes']}"
     print("[Pass] SQL temporal boundaries are strictly inclusive on both ends.")
-
 
 def test_unequal_sample_count_semantics():
     """
