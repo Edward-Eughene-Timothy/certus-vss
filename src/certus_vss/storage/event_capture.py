@@ -1,9 +1,4 @@
-"""Persist safety events and telemetry freeze frames from the volatile ring buffer.
-
-The event row is committed immediately. Freeze-frame capture can be called again
-until the post-event window is complete; inserts are idempotent even though the
-Track A schema does not declare a freeze-frame primary key.
-"""
+"""Persist safety events and telemetry freeze frames from the volatile ring buffer."""
 from __future__ import annotations
 
 import json
@@ -15,7 +10,9 @@ from typing import Any, Mapping
 from certus_vss.common.config import DB_PATH
 from certus_vss.ingestion.ring_buffer import SIGNAL_PATHS, TelemetryRingBuffer
 from certus_vss.storage.db_engine import SCHEMA_PATH, init_database
+from certus_vss.storage.capture_scheduler import PostEventCaptureScheduler
 
+_POST_EVENT_SCHEDULER = PostEventCaptureScheduler()
 
 def _finite_number(value: Any, field: str, *, default: float | None = None) -> float:
     if value is None and default is not None:
@@ -57,12 +54,7 @@ def record_safety_event(
     provenance: str = "certus_vss.event_capture",
     schema_path: Path = SCHEMA_PATH,
 ) -> int:
-    """Persist an event and currently available freeze-frame samples.
-
-    Call :func:`capture_event_window` again after the post-event interval to add
-    later samples. The ring buffer must still retain the requested window.
-    Returns the SQLite event_id.
-    """
+    """Persist an event and currently available freeze-frame samples."""
     if not isinstance(buffer, TelemetryRingBuffer):
         raise TypeError("buffer must be a TelemetryRingBuffer")
     if not isinstance(event, Mapping):
@@ -71,15 +63,23 @@ def record_safety_event(
         raise ValueError("pre_seconds must be finite and non-negative")
     if not math.isfinite(post_seconds) or post_seconds < 0:
         raise ValueError("post_seconds must be finite and non-negative")
+    
     timestamp = _finite_number(event.get("timestamp"), "timestamp")
     category = event.get("event_category", event.get("event_type", "safety_event"))
     severity = event.get("severity", "warning")
+    
+    # Preserves diagnostic integrity: real DTC if provided, otherwise None
+    raw_dtc = event.get("dtc_code")
+    dtc_code = str(raw_dtc).strip() if raw_dtc is not None and str(raw_dtc).strip() else None
+
     trigger_signal = event.get("trigger_signal", "Vehicle.Collision")
     trigger_value = _finite_number(event.get("trigger_value", event.get("intensity")), "trigger_value", default=0.0)
+    
     if not all(isinstance(v, str) and v.strip() for v in (category, severity, trigger_signal, drive_context, provenance)):
-        raise ValueError("event category, severity, trigger signal, context, and provenance must be non-empty strings")
+        raise ValueError("event fields must be non-empty strings")
+
     context = dict(event.get("context", {}))
-    for key in ("source", "other_actor_id", "intensity"):
+    for key in ("source", "other_actor_id", "intensity", "simulated_fault_code"):
         if key in event and key not in context:
             context[key] = event[key]
     context["drive_context"] = drive_context
@@ -95,14 +95,23 @@ def record_safety_event(
             (timestamp_utc_s, event_category, dtc_code, severity, trigger_signal,
              trigger_value, context_json, provenance)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (int(timestamp), category, event.get("dtc_code"), severity,
+            (int(timestamp), category, dtc_code, severity,
              trigger_signal, trigger_value, context_json, provenance),
         )
         event_id = int(cursor.lastrowid)
         _insert_freeze_frames(conn, event_id, buffer, timestamp, pre_seconds, post_seconds)
         conn.commit()
-    return event_id
 
+    _POST_EVENT_SCHEDULER.schedule(
+        event_id,
+        buffer,
+        timestamp,
+        db_path,
+        pre_seconds=pre_seconds,
+        post_seconds=post_seconds,
+    )
+
+    return event_id
 
 def capture_event_window(
     event_id: int,
@@ -113,7 +122,6 @@ def capture_event_window(
     pre_seconds: float = 120.0,
     post_seconds: float = 120.0,
 ) -> int:
-    """Add any currently retained samples in an event's window, without duplicates."""
     if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
         raise ValueError("event_id must be a positive integer")
     timestamp = _finite_number(event_timestamp, "event_timestamp")
