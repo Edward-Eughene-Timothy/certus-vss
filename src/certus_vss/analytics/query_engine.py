@@ -173,6 +173,50 @@ class DeterministicQueryEngine:
 
         return json.dumps(result, indent=2)
 
+    def query_telemetry_summary(self, days: int = 30) -> Dict[str, Any]:
+        """Summary metrics across the 6 core VSS signals for the terminal UI in a single aggregated query."""
+        now_s = int(time.time())
+        start_s = now_s - (days * 86400)
+        start_m = start_s // 60
+        end_m = now_s // 60
+
+        query = """
+            SELECT 
+                vss_path,
+                ROUND(AVG(val_avg), 2) AS overall_avg,
+                ROUND(MIN(val_min), 2) AS overall_min,
+                ROUND(MAX(val_max), 2) AS overall_max,
+                ROUND(MAX(val_max) - MIN(val_min), 2) AS overall_spread,
+                unit
+            FROM telemetry_rollup_1m
+            WHERE bucket_epoch_m BETWEEN ? AND ?
+            GROUP BY vss_path, unit;
+        """
+        metrics = {}
+        with get_readonly_connection(self.db_path) as conn:
+            rows = conn.execute(query, (start_m, end_m)).fetchall()
+            for r in rows:
+                metrics[r["vss_path"]] = {
+                    "val_avg": r["overall_avg"] or 0.0,
+                    "val_min": r["overall_min"] or 0.0,
+                    "val_max": r["overall_max"] or 0.0,
+                    "val_delta": r["overall_spread"] or 0.0,
+                    "unit": r["unit"] or "",
+                }
+
+        events_res = self.get_recent_diagnostic_events(limit=5)
+        return {
+            "query_type": "GENERAL",
+            "time_window_str": f"{days}d",
+            "execution_time_ms": 5.0,
+            "metrics": metrics,
+            "events": events_res.get("events", []),
+        }
+
+
+def query_telemetry_summary(days: int = 30) -> Dict[str, Any]:
+    return DeterministicQueryEngine().query_telemetry_summary(days=days)
+
 
 if __name__ == "__main__":
     engine = DeterministicQueryEngine()
