@@ -1,3 +1,4 @@
+from pathlib import Path
 """
 query_engine.py: Deterministic SQL analytics engine for CertusVSS.
 Executes parameterized bytecode queries on read-only SQLite handles.
@@ -7,14 +8,14 @@ Generates structured JSON Evidence Blocks for UI cards and SLM context.
 import json
 import time
 from typing import Any, Dict, List, Optional
-from certus_vss.storage.db_engine import get_readonly_connection
+from certus_vss.storage.db_engine import DB_PATH, get_readonly_connection
 
 
 class DeterministicQueryEngine:
     """Read-only analytics engine with sub-15ms execution targets."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, db_path: Optional[Path] = None) -> None:
+        self.db_path = db_path or DB_PATH
 
     def get_signal_metrics(
         self,
@@ -49,7 +50,7 @@ class DeterministicQueryEngine:
             query += " AND drive_context = ?"
             params.append(context_filter)
 
-        with get_readonly_connection() as conn:
+        with get_readonly_connection(self.db_path) as conn:
             row = conn.execute(query, params).fetchone()
 
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
@@ -96,7 +97,7 @@ class DeterministicQueryEngine:
         """
 
         events = []
-        with get_readonly_connection() as conn:
+        with get_readonly_connection(self.db_path) as conn:
             rows = conn.execute(query, (limit,)).fetchall()
             for r in rows:
                 ev = dict(r)
@@ -125,7 +126,7 @@ class DeterministicQueryEngine:
             ORDER BY offset_ms ASC;
         """
 
-        with get_readonly_connection() as conn:
+        with get_readonly_connection(self.db_path) as conn:
             rows = conn.execute(query, (event_id, vss_path)).fetchall()
 
         points = [{"offset_ms": r["offset_ms"], "val": r["raw_value"]} for r in rows]

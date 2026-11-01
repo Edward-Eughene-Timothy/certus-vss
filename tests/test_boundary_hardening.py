@@ -75,11 +75,20 @@ def test_null_dtc_diagnostic_purity() -> None:
     trigger_signal = "Vehicle.Powertrain.TractionBattery.Temperature"
     trigger_val = 49.2
 
-    for seq in range(10):
+    prev_minute_ts = ((int(now) // 60) - 1) * 60 + 10.0
+    assert buf.append({
+        "timestamp": prev_minute_ts,
+        "sequence": 0,
+        "signals": {p: 32.0 for p in SIGNAL_PATHS},
+    })
+
+    for seq in range(1, 11):
         ts = now - 5.0 + (seq * 0.5)
         signals = {p: 32.0 for p in SIGNAL_PATHS}
-        signals[trigger_signal] = trigger_val if seq == 9 else 32.0
+        signals[trigger_signal] = trigger_val if seq == 10 else 32.0
         assert buf.append({"timestamp": ts, "sequence": seq, "signals": signals})
+
+    flush_buffer_to_rollup(buf, db_path=DB_PATH)
 
     event_id = record_safety_event(
         buffer=buf,

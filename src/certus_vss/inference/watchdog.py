@@ -33,18 +33,25 @@ class MonotonicWatchdog:
 
 def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str, n_threads: int) -> None:
     """Top-level worker process entry point (spawn-safe). Loads llama.cpp once."""
-    from llama_cpp import Llama, LlamaGrammar
+    try:
+        from llama_cpp import Llama, LlamaGrammar
 
-    llm = Llama(
-        model_path=model_path_str,
-        n_ctx=256,
-        n_threads=n_threads,
-        n_batch=256,
-        verbose=False,
-    )
-    grammar = LlamaGrammar.from_string(gbnf_str)
-    llm("w", max_tokens=1)
-    conn.send(("READY", None))
+        llm = Llama(
+            model_path=model_path_str,
+            n_ctx=256,
+            n_threads=n_threads,
+            n_batch=256,
+            use_mmap=True,
+            verbose=False,
+        )
+        grammar = LlamaGrammar.from_string(gbnf_str)
+        # Warm up both the KV cache and GBNF grammar sampler before signaling READY
+        warmup_prefix = 'Value=35.0\n{"summary": "Event THERMAL_WARNING at 35.0", "key_facts": ["Trigger value '
+        llm(warmup_prefix, max_tokens=4, temperature=0.0, grammar=grammar)
+        conn.send(("READY", None))
+    except Exception as init_exc:
+        conn.send(("INIT_ERR", str(init_exc)))
+        return
 
     while True:
         try:

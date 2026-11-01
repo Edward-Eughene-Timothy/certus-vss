@@ -16,16 +16,28 @@ def test_end_to_end_track_a_track_b_integration() -> None:
     trigger_signal = "Vehicle.Powertrain.TractionBattery.Temperature"
     trigger_val = 47.5
 
-    # 1. Populate ring buffer around event time
-    for seq in range(10):
+    # 1a. Seed a sample in the previous completed minute so 24h rollup baseline is guaranteed
+    prev_minute_ts = ((int(now) // 60) - 1) * 60 + 10.0
+    baseline_signals = {path: 35.0 for path in SIGNAL_PATHS}
+    assert buf.append({
+        "timestamp": prev_minute_ts,
+        "sequence": 0,
+        "signals": baseline_signals,
+    })
+
+    # 1b. Populate ring buffer around current event time
+    for seq in range(1, 11):
         ts = now - 5.0 + (seq * 0.5)
         signals = {path: 35.0 for path in SIGNAL_PATHS}
-        signals[trigger_signal] = trigger_val if seq == 9 else 35.0
+        signals[trigger_signal] = trigger_val if seq == 10 else 35.0
         assert buf.append({
             "timestamp": ts,
             "sequence": seq,
             "signals": signals,
         })
+
+    # Flush completed minute to SQLite rollup table
+    flush_buffer_to_rollup(buf, db_path=DB_PATH)
 
     # 2. Record safety event using Track B event capture
     event_id = record_safety_event(
