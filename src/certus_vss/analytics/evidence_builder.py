@@ -2,8 +2,9 @@
 evidence_builder.py: Fail-closed deterministic telemetry evidence extractor.
 """
 import math
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-from certus_vss.storage.db_engine import get_readonly_connection
+from certus_vss.storage.db_engine import DB_PATH, get_readonly_connection
 from certus_vss.analytics.query_engine import DeterministicQueryEngine
 
 
@@ -25,11 +26,12 @@ def _require_finite_float(val: Any, name: str) -> float:
 
 
 class EvidenceBuilder:
-    def __init__(self) -> None:
-        self.engine = DeterministicQueryEngine()
+    def __init__(self, db_path: Optional[Path] = None) -> None:
+        self.db_path = db_path or DB_PATH
+        self.engine = DeterministicQueryEngine(db_path=self.db_path)
 
     def build_event_evidence(self, event_id: int) -> Dict[str, Any]:
-        with get_readonly_connection() as conn:
+        with get_readonly_connection(self.db_path) as conn:
             row = conn.execute(
                 "SELECT event_id, timestamp_utc_s, event_category, dtc_code, "
                 "severity, trigger_signal, trigger_value "

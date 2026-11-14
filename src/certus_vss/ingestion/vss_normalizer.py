@@ -5,9 +5,9 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from certus_vss.catalog.signals import CANONICAL_VSS_UNITS
 from .ring_buffer import SIGNAL_PATHS
 
-# Deliberately small initial alias map. Extend alongside DBC/CARLA adapters.
 _ALIASES = {
     "speed": "Vehicle.Speed",
     "vehicle_speed": "Vehicle.Speed",
@@ -24,22 +24,12 @@ _ALIASES = {
     "motor_coolant_temperature": "Vehicle.Powertrain.ElectricMotor.CoolantTemperature",
     "Vehicle.Powertrain.ElectricMotor.CoolantTemperature": "Vehicle.Powertrain.ElectricMotor.CoolantTemperature",
 }
-_UNITS = {
-    "Vehicle.Speed": "km/h",
-    "Vehicle.Powertrain.TractionBattery.Temperature": "celsius",
-    "Vehicle.Powertrain.TractionBattery.Current": "amperes",
-    "Vehicle.Powertrain.TractionBattery.StateOfCharge": "percent",
-    "Vehicle.Cabin.HVAC.PowerDraw": "watts",
-    "Vehicle.Powertrain.ElectricMotor.CoolantTemperature": "celsius",
-}
+
+_UNITS = CANONICAL_VSS_UNITS
 
 
 def normalize_vss(signal_key: str, value: float | Mapping[str, Any], unit: str | None = None) -> dict[str, Any]:
-    """Return a validated ``{path, value, unit}`` record for a known VSS signal.
-
-    Speed may be supplied in km/h or m/s. Unknown aliases, units, non-numeric
-    values, booleans, NaN and infinities are rejected with ``ValueError``.
-    """
+    """Return a validated ``{path, value, unit}`` record for a known VSS signal."""
     if signal_key not in _ALIASES:
         raise ValueError(f"unrecognized signal key: {signal_key}")
     path = _ALIASES[signal_key]
