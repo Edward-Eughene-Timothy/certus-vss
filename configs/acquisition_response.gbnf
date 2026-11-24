@@ -1,0 +1,11 @@
+root ::= summary-content "\"" ws "," ws "\"key_facts\"" ws ":" ws string-array ws "}"
+
+summary-content ::= char{1,80}
+
+string-array ::= "[" ws string ws "]"
+
+string ::= "\"" char{1,50} "\""
+
+char ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+
+ws ::= [ \t\n]*

@@ -141,6 +141,124 @@ class DeterministicQueryEngine:
             "execution_ms": round(elapsed_ms, 3),
         }
 
+
+    def get_acquisition_evidence(
+        self,
+        actor_id: int,
+        signal: str,
+        start_epoch_s: int,
+        end_epoch_s: int,
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        """Read chronological CARLA acquisition samples without modifying storage."""
+        import math
+
+        if isinstance(actor_id, bool) or not isinstance(actor_id, int):
+            raise ValueError("actor_id must be an integer")
+
+        if not isinstance(signal, str) or not signal.strip():
+            raise ValueError("signal must be a non-empty string")
+
+        for name, value in (
+            ("start_epoch_s", start_epoch_s),
+            ("end_epoch_s", end_epoch_s),
+            ("limit", limit),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
+
+        if start_epoch_s < 0 or end_epoch_s < start_epoch_s:
+            raise ValueError("Invalid acquisition time range")
+
+        if limit < 1 or limit > 10000:
+            raise ValueError("limit must be between 1 and 10000")
+
+        t_start = time.perf_counter()
+
+        query = """
+            SELECT sample_id, timestamp_utc_s, simulation_time_s,
+                   actor_id, signal, value_json, unit, source,
+                   provenance, availability
+            FROM acquisition_samples
+            WHERE actor_id = ?
+              AND signal = ?
+              AND timestamp_utc_s >= ?
+              AND timestamp_utc_s <= ?
+            ORDER BY timestamp_utc_s ASC, sample_id ASC
+            LIMIT ?
+        """
+
+        with get_readonly_connection(self.db_path) as conn:
+            rows = conn.execute(
+                query,
+                (
+                    actor_id,
+                    signal.strip(),
+                    start_epoch_s,
+                    end_epoch_s,
+                    limit,
+                ),
+            ).fetchall()
+
+        samples = []
+
+        for row in rows:
+            raw_value = row["value_json"]
+
+            try:
+                value = (
+                    json.loads(raw_value)
+                    if raw_value is not None
+                    else None
+                )
+            except (json.JSONDecodeError, TypeError) as err:
+                raise ValueError(
+                    f"Invalid JSON in acquisition sample {row['sample_id']}"
+                ) from err
+
+            def validate_finite(item: Any) -> None:
+                if isinstance(item, bool) or item is None:
+                    return
+                if isinstance(item, (int, float)):
+                    if not math.isfinite(item):
+                        raise ValueError(
+                            f"Non-finite value in acquisition sample "
+                            f"{row['sample_id']}"
+                        )
+                elif isinstance(item, (list, dict)):
+                    values = (
+                        item.values() if isinstance(item, dict) else item
+                    )
+                    for child in values:
+                        validate_finite(child)
+
+            validate_finite(value)
+
+            samples.append({
+                "sample_id": row["sample_id"],
+                "timestamp_utc_s": row["timestamp_utc_s"],
+                "simulation_time_s": row["simulation_time_s"],
+                "actor_id": row["actor_id"],
+                "signal": row["signal"],
+                "value": value,
+                "unit": row["unit"],
+                "source": row["source"],
+                "provenance": row["provenance"],
+                "availability": row["availability"],
+            })
+
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+
+        return {
+            "status": "SUCCESS" if samples else "NO_DATA",
+            "actor_id": actor_id,
+            "signal": signal.strip(),
+            "sample_count": len(samples),
+            "samples": samples,
+            "execution_ms": round(elapsed_ms, 3),
+        }
+
+
     def build_evidence_block(self, query_type: str, **kwargs: Any) -> str:
         """
         Builds the immutable JSON evidence block provided to the UI & SLM.
@@ -168,6 +286,14 @@ class DeterministicQueryEngine:
                     ),
                 ),
             }
+        elif query_type == "acquisition":
+            result = self.get_acquisition_evidence(
+                actor_id=kwargs["actor_id"],
+                signal=kwargs["signal"],
+                start_epoch_s=kwargs["start_epoch_s"],
+                end_epoch_s=kwargs["end_epoch_s"],
+                limit=kwargs.get("limit", 1000),
+            )
         else:
             raise ValueError(f"Unknown query_type: {query_type}")
 

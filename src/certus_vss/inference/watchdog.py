@@ -30,9 +30,41 @@ class MonotonicWatchdog:
         rem_ms = self.deadline_ms - self.elapsed_ms()
         return max(0.0, rem_ms / 1000.0)
 
+def validate_acquisition_context(
+    llm: Any,
+    prompt: str,
+    max_tokens: int,
+    context_limit: int = 256,
+) -> int:
+    """Reject acquisition prompts that exceed the model context budget."""
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be positive")
 
-def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str, n_threads: int = 2) -> None:
-    """Top-level worker process entry point (spawn-safe). Loads llama.cpp once."""
+    prompt_tokens = len(
+        llm.tokenize(
+            prompt.encode("utf-8"),
+            add_bos=True,
+        )
+    )
+
+    if prompt_tokens + max_tokens > context_limit:
+        raise ValueError(
+            "Acquisition prompt exceeds context budget: "
+            f"{prompt_tokens} prompt tokens + "
+            f"{max_tokens} output tokens > "
+            f"{context_limit} context tokens"
+        )
+
+    return prompt_tokens
+
+def _persistent_worker_loop(
+    conn: Connection,
+    model_path_str: str,
+    gbnf_str: str,
+    n_threads: int,
+    acquisition_gbnf_str: Optional[str] = None,
+) -> None:
+    """Load one model and support request-specific response grammars."""
     try:
         from llama_cpp import Llama, LlamaGrammar
 
@@ -44,11 +76,31 @@ def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str
             use_mmap=True,
             verbose=False,
         )
-        grammar = LlamaGrammar.from_string(gbnf_str)
-        # Warm up both the KV cache and GBNF grammar sampler before signaling READY
-        warmup_prefix = 'Value=35.0\n{"summary": "Event THERMAL_WARNING at 35.0", "key_facts": ["Trigger value '
-        llm(warmup_prefix, max_tokens=4, temperature=0.0, grammar=grammar)
+
+        grammars = {
+            "diagnostic": LlamaGrammar.from_string(gbnf_str),
+        }
+
+        if acquisition_gbnf_str is not None:
+            grammars["acquisition"] = LlamaGrammar.from_string(
+                acquisition_gbnf_str
+            )
+
+        # Preserve the existing diagnostic warmup.
+        warmup_prefix = (
+            'Value=35.0\n'
+            '{"summary": "Event THERMAL_WARNING at 35.0", '
+            '"key_facts": ["Trigger value '
+        )
+        llm(
+            warmup_prefix,
+            max_tokens=4,
+            temperature=0.0,
+            grammar=grammars["diagnostic"],
+        )
+
         conn.send(("READY", None))
+
     except Exception as init_exc:
         conn.send(("INIT_ERR", str(init_exc)))
         return
@@ -64,21 +116,41 @@ def _persistent_worker_loop(conn: Connection, model_path_str: str, gbnf_str: str
         if msg is None or msg.get("cmd") == "SHUTDOWN":
             break
 
-        # Support deliberate stall injection for watchdog preemption testing
         stall_ms = float(msg.get("simulate_stall_ms", 0.0))
         if stall_ms > 0:
             time.sleep(stall_ms / 1000.0)
 
         try:
+            grammar_name = msg.get("grammar", "diagnostic")
+
+            if grammar_name not in grammars:
+                raise ValueError(
+                    f"Unsupported or unavailable grammar: {grammar_name}"
+                )
+
+            max_tokens = int(msg.get("max_tokens", 12))
+
+            if max_tokens < 1:
+                raise ValueError("max_tokens must be positive")
+
+            if grammar_name == "acquisition":
+                validate_acquisition_context(
+                    llm,
+                    msg["prompt"],
+                    max_tokens,
+                )
+
             res = llm(
                 msg["prompt"],
-                max_tokens=int(msg.get("max_tokens", 12)),
+                max_tokens=max_tokens,
                 temperature=0.0,
-                grammar=grammar,
+                grammar=grammars[grammar_name],
             )
+
             conn.send(("OK", {
                 "text": res["choices"][0]["text"].strip(),
                 "tokens": res["usage"]["completion_tokens"],
             }))
+
         except Exception as exc:
             conn.send(("ERR", str(exc)))
